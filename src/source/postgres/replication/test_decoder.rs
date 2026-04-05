@@ -118,6 +118,13 @@ fn parse_update_data(parts: &[String]) -> Result<(Option<String>, serde_json::Va
         }
     }
 
+    // Strip WAL internal metadata that leaks from test_decoding
+    // with REPLICA IDENTITY FULL (not actual table data)
+    for fields in [&mut new_fields, &mut old_fields] {
+        fields.remove("new_tuple");
+        fields.remove("old_tuple");
+    }
+
     let data = if !new_fields.is_empty() {
         serde_json::Value::Object(new_fields)
     } else {
