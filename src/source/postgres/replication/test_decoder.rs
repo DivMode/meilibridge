@@ -93,11 +93,11 @@ fn parse_update_data(parts: &[String]) -> Result<(Option<String>, serde_json::Va
     let mut is_new_section = false;
 
     for part in parts {
-        if part == "new-key:" {
+        if part == "new-key:" || part == "new-tuple:" {
             is_new_section = true;
             continue;
         }
-        if part == "old-key:" {
+        if part == "old-key:" || part == "old-tuple:" {
             is_new_section = false;
             continue;
         }
@@ -123,6 +123,8 @@ fn parse_update_data(parts: &[String]) -> Result<(Option<String>, serde_json::Va
     for fields in [&mut new_fields, &mut old_fields] {
         fields.remove("new_tuple");
         fields.remove("old_tuple");
+        fields.remove("new-tuple");
+        fields.remove("old-tuple");
     }
 
     let data = if !new_fields.is_empty() {
