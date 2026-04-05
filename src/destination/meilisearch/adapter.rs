@@ -1,3 +1,4 @@
+use crate::config::DocumentMode;
 use crate::config::{MeilisearchConfig, PerformanceConfig};
 use crate::destination::adapter::{DestinationAdapter, SyncResult};
 use crate::destination::meilisearch::{
@@ -21,12 +22,19 @@ pub struct MeilisearchAdapter {
     batch_processor: BatchProcessor,
     table_primary_keys: HashMap<String, String>,
     table_to_index: HashMap<String, String>,
+    table_to_document_mode: HashMap<String, DocumentMode>,
     adaptive_batching: Option<Arc<AdaptiveBatchingManager>>,
     performance_config: PerformanceConfig,
+    /// Current document mode for the batch being flushed
+    current_document_mode: DocumentMode,
 }
 
 impl MeilisearchAdapter {
-    pub fn new(config: MeilisearchConfig, table_to_index: HashMap<String, String>) -> Self {
+    pub fn new(
+        config: MeilisearchConfig,
+        table_to_index: HashMap<String, String>,
+        table_to_document_mode: HashMap<String, DocumentMode>,
+    ) -> Self {
         let primary_key = config.primary_key.clone();
 
         // Initialize default primary keys for known tables
@@ -41,8 +49,10 @@ impl MeilisearchAdapter {
             batch_processor: BatchProcessor::new(primary_key),
             table_primary_keys,
             table_to_index,
+            table_to_document_mode,
             adaptive_batching: None,
             performance_config: PerformanceConfig::default(),
+            current_document_mode: DocumentMode::default(),
         }
     }
 
@@ -152,22 +162,38 @@ impl MeilisearchAdapter {
         let client = self.get_client()?;
         let index = self.get_or_create_index(index_name, primary_key).await?;
 
-        // Process upserts
+        // Process upserts — use document_mode to choose replace vs merge
         if !self.batch_processor.documents_to_upsert.is_empty() {
             let doc_count = self.batch_processor.documents_to_upsert.len();
+            let mode_label = if self.current_document_mode == DocumentMode::Update {
+                "update (merge)"
+            } else {
+                "replace"
+            };
             debug!(
-                "Upserting {} documents to index '{}'",
-                doc_count, index_name
+                "Upserting {} documents to index '{}' (mode: {})",
+                doc_count, index_name, mode_label
             );
 
-            match client
-                .add_documents(
-                    &index,
-                    &self.batch_processor.documents_to_upsert,
-                    self.config.primary_key.as_deref(),
-                )
-                .await
-            {
+            let write_result = if self.current_document_mode == DocumentMode::Update {
+                client
+                    .update_documents(
+                        &index,
+                        &self.batch_processor.documents_to_upsert,
+                        self.config.primary_key.as_deref(),
+                    )
+                    .await
+            } else {
+                client
+                    .add_documents(
+                        &index,
+                        &self.batch_processor.documents_to_upsert,
+                        self.config.primary_key.as_deref(),
+                    )
+                    .await
+            };
+
+            match write_result {
                 Ok(()) => {
                     result.success_count += doc_count;
                 }
@@ -223,17 +249,19 @@ impl DestinationAdapter for MeilisearchAdapter {
         let mut result = SyncResult::new();
         let mut last_position = None;
 
-        // Group events by index derived from the configured task mapping
-        let mut events_by_index: HashMap<String, Vec<Event>> = HashMap::new();
+        // Group events by (index, table) so we can resolve document_mode per table
+        let mut events_by_index_table: HashMap<(String, String), Vec<Event>> = HashMap::new();
 
         for event in events {
-            let index_name = match &event {
+            let (index_name, table_name) = match &event {
                 Event::Cdc(cdc) => {
-                    self.resolve_index_name(Some(&cdc.schema), &cdc.table, &cdc.table)
+                    let idx = self.resolve_index_name(Some(&cdc.schema), &cdc.table, &cdc.table);
+                    (idx, cdc.table.clone())
                 }
                 Event::FullSync { table, .. } => {
-                    let (schema, table_name) = Self::split_table_identifier(table);
-                    self.resolve_index_name(schema.as_deref(), &table_name, table)
+                    let (schema, tbl) = Self::split_table_identifier(table);
+                    let idx = self.resolve_index_name(schema.as_deref(), &tbl, table);
+                    (idx, tbl)
                 }
                 _ => continue,
             };
@@ -245,11 +273,14 @@ impl DestinationAdapter for MeilisearchAdapter {
                 }
             }
 
-            events_by_index.entry(index_name).or_default().push(event);
+            events_by_index_table
+                .entry((index_name, table_name))
+                .or_default()
+                .push(event);
         }
 
-        // Process each index's events
-        for (index_name, index_events) in events_by_index {
+        // Process each (index, table) group's events
+        for ((index_name, table_name), index_events) in events_by_index_table {
             // Get primary key for this table
             let primary_key_owned = self
                 .table_primary_keys
@@ -261,10 +292,19 @@ impl DestinationAdapter for MeilisearchAdapter {
             // Update batch processor with correct primary key
             self.batch_processor = BatchProcessor::new(primary_key_owned.clone());
 
+            // Set document mode for this table (CDC uses configured mode, full sync always replaces)
+            self.current_document_mode = self
+                .table_to_document_mode
+                .get(&table_name)
+                .cloned()
+                .unwrap_or_default();
+
             debug!(
-                "Processing {} events for index '{}'",
+                "Processing {} events for index '{}' (table: {}, mode: {:?})",
                 index_events.len(),
-                index_name
+                index_name,
+                table_name,
+                self.current_document_mode
             );
 
             // Process events into batch

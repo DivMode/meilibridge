@@ -1,6 +1,24 @@
 use crate::config::{FilterConfig, MappingConfig, TransformConfig};
 use serde::{Deserialize, Serialize};
 
+/// Controls how CDC events write documents to Meilisearch.
+/// Full sync always uses replace regardless of this setting.
+///
+/// - `replace` (default): POST /documents — full document replacement.
+///   Overwrites entire existing document. Fields not in the new doc are removed.
+///   Use for primary/parent tables that own the full document.
+///
+/// - `update`: PUT /documents — partial merge.
+///   Only provided fields are updated. Existing fields are preserved.
+///   Use for child/related tables that enrich an existing document.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentMode {
+    #[default]
+    Replace,
+    Update,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SyncTaskConfig {
     /// Unique identifier for the task
@@ -20,6 +38,11 @@ pub struct SyncTaskConfig {
     /// Primary key field
     #[serde(default = "default_pk")]
     pub primary_key: String,
+
+    /// How CDC events write documents: "replace" (default) or "update" (partial merge).
+    /// Full sync always uses replace regardless of this setting.
+    #[serde(default)]
+    pub document_mode: DocumentMode,
 
     /// Filter configuration
     #[serde(skip_serializing_if = "Option::is_none")]

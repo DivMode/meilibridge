@@ -404,6 +404,34 @@ impl PipelineOrchestrator {
         map
     }
 
+    fn build_table_document_mode_map(
+        config: &Config,
+    ) -> HashMap<String, crate::config::DocumentMode> {
+        let mut map = HashMap::new();
+
+        for task in &config.sync_tasks {
+            if task.table.is_empty() {
+                continue;
+            }
+
+            let (schema_opt, table_name) = Self::parse_table_identifier(&task.table);
+
+            if let Some(schema) = schema_opt.as_deref() {
+                let key = Self::canonical_table_key(Some(schema), &table_name);
+                if !key.is_empty() {
+                    map.insert(key, task.document_mode.clone());
+                }
+            }
+
+            let table_key = Self::canonical_table_key(None, &table_name);
+            if !table_key.is_empty() {
+                map.insert(table_key, task.document_mode.clone());
+            }
+        }
+
+        map
+    }
+
     fn parse_table_identifier(table: &str) -> (Option<String>, String) {
         let trimmed = table.trim();
         if trimmed.is_empty() {
@@ -942,8 +970,13 @@ impl PipelineOrchestrator {
         adaptive_batching_manager: Option<Arc<AdaptiveBatchingManager>>,
     ) {
         let table_to_index = Self::build_table_index_map(&config);
+        let table_to_document_mode = Self::build_table_document_mode_map(&config);
 
-        let mut base_adapter = MeilisearchAdapter::new(config.meilisearch.clone(), table_to_index);
+        let mut base_adapter = MeilisearchAdapter::new(
+            config.meilisearch.clone(),
+            table_to_index,
+            table_to_document_mode,
+        );
 
         if let Some(manager) = adaptive_batching_manager {
             base_adapter = base_adapter.with_adaptive_batching(manager, config.performance.clone());

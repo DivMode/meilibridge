@@ -235,6 +235,77 @@ impl ProtectedMeilisearchClient {
         }
     }
 
+    /// Update (partial merge) documents with circuit breaker protection.
+    /// Uses PUT /documents — only updates provided fields, preserves existing fields.
+    pub async fn update_documents(
+        &self,
+        index: &Index,
+        documents: &[Value],
+        primary_key: Option<&str>,
+    ) -> Result<()> {
+        if let Some(ref cb) = self.circuit_breaker {
+            let client = self.client.clone();
+            let index = index.clone();
+            let documents = documents.to_vec();
+            let primary_key = primary_key.map(|s| s.to_string());
+
+            match cb
+                .call(|| {
+                    Box::pin(async move {
+                        match index
+                            .add_or_update(&documents, primary_key.as_deref())
+                            .await
+                        {
+                            Ok(task) => {
+                                let task_info = client
+                                    .client()
+                                    .wait_for_task(task, None, None)
+                                    .await
+                                    .map_err(convert_error)?;
+
+                                if task_info.is_success() {
+                                    Ok(())
+                                } else {
+                                    Err(MeiliBridgeError::Meilisearch(format!(
+                                        "Update documents failed: {task_info:?}",
+                                    )))
+                                }
+                            }
+                            Err(e) => Err(convert_error(e)),
+                        }
+                    })
+                })
+                .await
+            {
+                Ok(result) => Ok(result),
+                Err(CircuitBreakerError::CircuitOpen) => Err(MeiliBridgeError::Meilisearch(
+                    "Circuit breaker is open, cannot update documents".to_string(),
+                )),
+                Err(CircuitBreakerError::OperationError(e)) => Err(e),
+            }
+        } else {
+            match index.add_or_update(documents, primary_key).await {
+                Ok(task) => {
+                    let task_info = self
+                        .client
+                        .client()
+                        .wait_for_task(task, None, None)
+                        .await
+                        .map_err(convert_error)?;
+
+                    if task_info.is_success() {
+                        Ok(())
+                    } else {
+                        Err(MeiliBridgeError::Meilisearch(format!(
+                            "Update documents failed: {task_info:?}",
+                        )))
+                    }
+                }
+                Err(e) => Err(convert_error(e)),
+            }
+        }
+    }
+
     /// Delete documents with circuit breaker protection
     pub async fn delete_documents(&self, index: &Index, document_ids: &[String]) -> Result<()> {
         if let Some(ref cb) = self.circuit_breaker {
