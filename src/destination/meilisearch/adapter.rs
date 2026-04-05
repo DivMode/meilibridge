@@ -1,5 +1,5 @@
 use crate::config::DocumentMode;
-use crate::config::{MeilisearchConfig, PerformanceConfig};
+use crate::config::{convert_keys_to_camel_case, MeilisearchConfig, OutputCasing, PerformanceConfig};
 use crate::destination::adapter::{DestinationAdapter, SyncResult};
 use crate::destination::meilisearch::{
     batch_processor::BatchProcessor, client::convert_error,
@@ -175,11 +175,22 @@ impl MeilisearchAdapter {
                 doc_count, index_name, mode_label
             );
 
+            // Apply output casing conversion (e.g., snake_case → camelCase)
+            let docs = if self.config.output_casing == OutputCasing::CamelCase {
+                self.batch_processor
+                    .documents_to_upsert
+                    .iter()
+                    .map(|doc| convert_keys_to_camel_case(doc.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                self.batch_processor.documents_to_upsert.clone()
+            };
+
             let write_result = if self.current_document_mode == DocumentMode::Update {
                 client
                     .update_documents(
                         &index,
-                        &self.batch_processor.documents_to_upsert,
+                        &docs,
                         self.config.primary_key.as_deref(),
                     )
                     .await
@@ -187,7 +198,7 @@ impl MeilisearchAdapter {
                 client
                     .add_documents(
                         &index,
-                        &self.batch_processor.documents_to_upsert,
+                        &docs,
                         self.config.primary_key.as_deref(),
                     )
                     .await
@@ -379,6 +390,13 @@ impl DestinationAdapter for MeilisearchAdapter {
                 .unwrap_or(self.config.batch_size)
         } else {
             self.config.batch_size
+        };
+
+        // Apply output casing conversion for full sync too
+        let documents = if self.config.output_casing == OutputCasing::CamelCase {
+            documents.into_iter().map(convert_keys_to_camel_case).collect::<Vec<_>>()
+        } else {
+            documents
         };
 
         // Import in batches

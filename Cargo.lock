@@ -1508,6 +1508,7 @@ dependencies = [
  "config",
  "deadpool-postgres",
  "futures",
+ "heck",
  "lazy_static",
  "meilisearch-sdk",
  "once_cell",

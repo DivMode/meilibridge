@@ -1,6 +1,39 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Controls the casing of JSON keys sent to Meilisearch.
+/// Postgres columns are typically snake_case, but frontends expect camelCase.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputCasing {
+    /// Send keys as-is from Postgres (default)
+    #[default]
+    Preserve,
+    /// Convert snake_case keys to camelCase (auction_end_time → auctionEndTime)
+    CamelCase,
+}
+
+/// Recursively convert all keys in a JSON Value from snake_case to camelCase.
+/// Uses the `heck` crate for battle-tested, Unicode-aware casing conversion.
+pub fn convert_keys_to_camel_case(value: serde_json::Value) -> serde_json::Value {
+    use heck::ToLowerCamelCase;
+
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (key, val) in map {
+                let new_key = key.to_lower_camel_case();
+                new_map.insert(new_key, convert_keys_to_camel_case(val));
+            }
+            serde_json::Value::Object(new_map)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(convert_keys_to_camel_case).collect())
+        }
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeilisearchConfig {
     /// API URL
@@ -33,6 +66,12 @@ pub struct MeilisearchConfig {
     /// Auto-create indexes if they don't exist
     #[serde(default = "default_auto_create_index")]
     pub auto_create_index: bool,
+
+    /// Convert document key casing before sending to Meilisearch.
+    /// "camel_case": snake_case → camelCase (auction_end_time → auctionEndTime)
+    /// "preserve": send as-is (default)
+    #[serde(default)]
+    pub output_casing: OutputCasing,
 
     /// Circuit breaker configuration
     #[serde(default)]
